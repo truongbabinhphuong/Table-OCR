@@ -1,0 +1,6 @@
+{
+  "name": "VietTable OCR - Scanned PDF to Excel",
+  "description": "Extract tabular data from scanned PDF documents with column definition, interactive page area cropping, high-accuracy Vietnamese OCR, table preview with cell editor, and Excel (.xlsx) export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
