@@ -9,6 +9,15 @@ import { ColumnManager } from "./components/ColumnManager";
 import { PageAreaSelector } from "./components/PageAreaSelector";
 import { TableEditor } from "./components/TableEditor";
 import { BulkProcessor } from "./components/BulkProcessor";
+import { ApiKeyModal } from "./components/ApiKeyModal";
+import {
+  detectColumnsAPI,
+  extractTableAPI,
+  detectTableBoxAPI,
+  hasStoredApiKey,
+  getStoredApiKey,
+  isStaticHostingEnvironment,
+} from "./services/geminiOcrService";
 import {
   FileSpreadsheet,
   ScanLine,
@@ -25,6 +34,7 @@ import {
   Zap,
   Files,
   FileText,
+  Key,
 } from "lucide-react";
 
 export default function App() {
@@ -70,6 +80,19 @@ export default function App() {
   const [fullAutoProgress, setFullAutoProgress] = useState<number>(0);
   const [isSemiAutoMode, setIsSemiAutoMode] = useState<boolean>(false);
   const [isWaitingSemiAutoReview, setIsWaitingSemiAutoReview] = useState<boolean>(false);
+
+  // API Key management modal state
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [savedApiKey, setSavedApiKey] = useState<string>(() => getStoredApiKey());
+
+  // Listen for API key changes across components
+  useEffect(() => {
+    const handleKeyChange = (e: any) => {
+      setSavedApiKey(e.detail?.apiKey || getStoredApiKey());
+    };
+    window.addEventListener("vietocr_api_key_changed", handleKeyChange);
+    return () => window.removeEventListener("vietocr_api_key_changed", handleKeyChange);
+  }, []);
 
   // Abort Controllers for cancellation
   const detectAbortControllerRef = useRef<AbortController | null>(null);
@@ -154,10 +177,15 @@ export default function App() {
         }
       }
     } catch (_) {}
-    if (msg.includes("503") || msg.includes("UNAVAILABLE") || msg.includes("high demand")) {
+
+    if (msg.includes("NEED_API_KEY")) {
+      setIsApiKeyModalOpen(true);
+      return "Bạn đang sử dụng trên môi trường tĩnh hoặc GitHub Pages. Vui lòng cấu hình Gemini API Key để tiếp tục.";
+    }
+    if (msg.includes("503") || msg.includes("UNAVAILABLE") || msg.includes("high demand") || msg.includes("quá tải")) {
       return "Hệ thống AI đang quá tải tạm thời (503). Vui lòng thử lại sau vài giây.";
     }
-    if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED")) {
+    if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota")) {
       return "Đã đạt giới hạn tần suất yêu cầu AI. Vui lòng đợi 10-15 giây rồi thử lại.";
     }
     return msg;
@@ -206,24 +234,14 @@ export default function App() {
         );
       }
 
-      const res = await fetch("/api/ocr/detect-columns", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const result = await detectColumnsAPI({
+        imageBase64: base64ToAnalyze,
+        mimeType: "image/png",
         signal: abortController.signal,
-        body: JSON.stringify({
-          imageBase64: base64ToAnalyze,
-          mimeType: "image/png",
-        }),
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Lỗi khi nhận diện cột");
-      }
-
-      const result = await res.json();
-      if (result.data?.detectedColumns && Array.isArray(result.data.detectedColumns) && result.data.detectedColumns.length > 0) {
-        const newCols: ColumnDef[] = result.data.detectedColumns.map((col: any, idx: number) => ({
+      if (result.detectedColumns && Array.isArray(result.detectedColumns) && result.detectedColumns.length > 0) {
+        const newCols: ColumnDef[] = result.detectedColumns.map((col: any, idx: number) => ({
           id: `col-ai-${Date.now()}-${idx}`,
           name: col.name || `Cột ${idx + 1}`,
           key: col.key || `col${idx + 1}`,
@@ -239,7 +257,7 @@ export default function App() {
         } else {
           showNotification(
             "success",
-            `Đã quét thành công dòng tiêu đề & dòng 1${cropToUse ? ` từ ${cropToUse.label}` : ""}: Nhận diện ${newCols.length} cột (${result.data.documentType || "Bảng dữ liệu"}).`
+            `Đã quét thành công dòng tiêu đề & dòng 1${cropToUse ? ` từ ${cropToUse.label}` : ""}: Nhận diện ${newCols.length} cột (${result.documentType || "Bảng dữ liệu"}).`
           );
         }
       } else {
@@ -279,24 +297,14 @@ export default function App() {
     });
 
     try {
-      const res = await fetch("/api/ocr/detect-columns", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const result = await detectColumnsAPI({
+        imageBase64: activePage.imageUrl,
+        mimeType: "image/png",
         signal: abortController.signal,
-        body: JSON.stringify({
-          imageBase64: activePage.imageUrl,
-          mimeType: "image/png",
-        }),
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Lỗi khi nhận diện cột");
-      }
-
-      const result = await res.json();
-      if (result.data?.detectedColumns && Array.isArray(result.data.detectedColumns) && result.data.detectedColumns.length > 0) {
-        const newCols: ColumnDef[] = result.data.detectedColumns.map((col: any, idx: number) => ({
+      if (result.detectedColumns && Array.isArray(result.detectedColumns) && result.detectedColumns.length > 0) {
+        const newCols: ColumnDef[] = result.detectedColumns.map((col: any, idx: number) => ({
           id: `col-ai-${Date.now()}-${idx}`,
           name: col.name || `Cột ${idx + 1}`,
           key: col.key || `col${idx + 1}`,
@@ -306,7 +314,7 @@ export default function App() {
         setColumns(newCols);
         showNotification(
           "success",
-          `Đã quét toàn trang ${activePage.pageNumber}: Tự động nhận diện ${newCols.length} cột (${result.data.documentType || "Bảng dữ liệu"}).`
+          `Đã quét toàn trang ${activePage.pageNumber}: Tự động nhận diện ${newCols.length} cột (${result.documentType || "Bảng dữ liệu"}).`
         );
       } else {
         throw new Error("Không tìm thấy dòng tiêu đề cột rõ ràng.");
@@ -368,30 +376,16 @@ export default function App() {
         throw new DOMException("Aborted", "AbortError");
       }
 
-      // 2. Call backend OCR API
-      const res = await fetch("/api/ocr/extract-table", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      // 2. Call OCR Service (Server or Direct Gemini API)
+      const result = await extractTableAPI({
+        imageBase64: croppedBase64,
+        mimeType: "image/png",
+        columns,
+        pageNumber: crop.pageNumber,
         signal: currentAbortSignal,
-        body: JSON.stringify({
-          imageBase64: croppedBase64,
-          mimeType: "image/png",
-          columns: columns.map((c) => ({
-            name: c.name,
-            key: c.key,
-            type: c.type,
-            description: c.description,
-          })),
-        }),
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "OCR trích xuất thất bại");
-      }
-
-      const result = await res.json();
-      const extractedRows = result.data?.rows || [];
+      const extractedRows = result.rows || [];
 
       // Format rows with internal tracking ID
       const newTableRows: TableRow[] = extractedRows.map((r: any, idx: number) => {
@@ -503,47 +497,39 @@ export default function App() {
       } else {
         // Try AI vision table boundary detection on page 1
         try {
-          const tableBoxRes = await fetch("/api/ocr/detect-table-box", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          const boxData = await detectTableBoxAPI({
+            imageBase64: firstPage.imageUrl,
+            mimeType: "image/png",
             signal: autoAbort.signal,
-            body: JSON.stringify({
-              imageBase64: firstPage.imageUrl,
-              mimeType: "image/png",
-            }),
           });
 
-          if (tableBoxRes.ok) {
-            const boxData = await tableBoxRes.json();
-            const b = boxData.data;
-            if (b && typeof b.ymin === "number" && typeof b.ymax === "number") {
-              const pW = firstPage.originalWidth || firstPage.width / 2;
-              const pH = firstPage.originalHeight || firstPage.height / 2;
+          if (boxData && typeof boxData.ymin === "number" && typeof boxData.ymax === "number") {
+            const pW = firstPage.originalWidth || firstPage.width / 2;
+            const pH = firstPage.originalHeight || firstPage.height / 2;
 
-              // Convert 0-1000 scale to display coordinates with safety margin to ensure 100% table coverage
-              const normYmin = b.ymin > 1 ? b.ymin / 1000 : b.ymin;
-              const normYmax = b.ymax > 1 ? b.ymax / 1000 : b.ymax;
-              const normXmin = b.xmin > 1 ? b.xmin / 1000 : b.xmin;
-              const normXmax = b.xmax > 1 ? b.xmax / 1000 : b.xmax;
+            // Convert 0-1000 scale to display coordinates with safety margin to ensure 100% table coverage
+            const normYmin = boxData.ymin > 1 ? boxData.ymin / 1000 : boxData.ymin;
+            const normYmax = boxData.ymax > 1 ? boxData.ymax / 1000 : boxData.ymax;
+            const normXmin = (boxData.xmin !== undefined && boxData.xmin > 1) ? boxData.xmin / 1000 : (boxData.xmin || 0);
+            const normXmax = (boxData.xmax !== undefined && boxData.xmax > 1) ? boxData.xmax / 1000 : (boxData.xmax || 1);
 
-              // Generous margins: expand by 2% top/bottom and 3% left/right so no cells or borders are clipped
-              const yMinClamped = Math.max(0, Math.floor((normYmin - 0.02) * pH));
-              const yMaxClamped = Math.min(pH, Math.ceil((normYmax + 0.03) * pH));
-              const xMinClamped = Math.max(0, Math.floor((normXmin - 0.03) * pW));
-              const xMaxClamped = Math.min(pW, Math.ceil((normXmax + 0.03) * pW));
+            // Generous margins: expand by 2% top/bottom and 3% left/right so no cells or borders are clipped
+            const yMinClamped = Math.max(0, Math.floor((normYmin - 0.02) * pH));
+            const yMaxClamped = Math.min(pH, Math.ceil((normYmax + 0.03) * pH));
+            const xMinClamped = Math.max(0, Math.floor((normXmin - 0.03) * pW));
+            const xMaxClamped = Math.min(pW, Math.ceil((normXmax + 0.03) * pW));
 
-              baseCrop = {
-                id: `crop-auto-1`,
-                pageNumber: 1,
-                x: xMinClamped,
-                y: yMinClamped,
-                width: Math.max(100, xMaxClamped - xMinClamped),
-                height: Math.max(80, yMaxClamped - yMinClamped),
-                label: `Toàn bộ Bảng dữ liệu (Trang 1)`,
-                status: "idle",
-                selectedForScan: true,
-              };
-            }
+            baseCrop = {
+              id: `crop-auto-1`,
+              pageNumber: 1,
+              x: xMinClamped,
+              y: yMinClamped,
+              width: Math.max(100, xMaxClamped - xMinClamped),
+              height: Math.max(80, yMaxClamped - yMinClamped),
+              label: `Toàn bộ Bảng dữ liệu (Trang 1)`,
+              status: "idle",
+              selectedForScan: true,
+            };
           }
         } catch (e) {
           console.warn("AI table box detection fallback to full width/height:", e);
@@ -639,50 +625,43 @@ export default function App() {
             );
           }
 
-          const res = await fetch("/api/ocr/extract-table", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          const result = await extractTableAPI({
+            imageBase64: croppedBase64,
+            mimeType: "image/png",
+            columns: targetCols,
+            pageNumber: crop.pageNumber,
             signal: autoAbort.signal,
-            body: JSON.stringify({
-              imageBase64: croppedBase64,
-              mimeType: "image/png",
-              columns: targetCols,
-              pageNumber: crop.pageNumber,
-            }),
           });
 
-          if (res.ok) {
-            const result = await res.json();
-            const extractedRows = result.data?.rows || [];
-            const newTableRows: TableRow[] = extractedRows.map((r: any, idx: number) => {
-              const rowId = `row-${Date.now()}-${crop.id}-${idx}`;
-              const rowObj: TableRow = {
-                _id: rowId,
-                _pageNumber: crop.pageNumber,
-                _cropId: crop.id,
-                _isModified: false,
-              };
-              targetCols.forEach((col) => {
-                rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
-              });
-              return rowObj;
+          const extractedRows = result.rows || [];
+          const newTableRows: TableRow[] = extractedRows.map((r: any, idx: number) => {
+            const rowId = `row-${Date.now()}-${crop.id}-${idx}`;
+            const rowObj: TableRow = {
+              _id: rowId,
+              _pageNumber: crop.pageNumber,
+              _cropId: crop.id,
+              _isModified: false,
+            };
+            targetCols.forEach((col) => {
+              rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
             });
+            return rowObj;
+          });
 
-            allExtractedRows = [...allExtractedRows, ...newTableRows];
+          allExtractedRows = [...allExtractedRows, ...newTableRows];
 
-            setCropAreas((prev) =>
-              prev.map((c) =>
-                c.id === crop.id
-                  ? {
-                      ...c,
-                      status: "success",
-                      extractedRowCount: newTableRows.length,
-                      croppedImageUrl: croppedBase64,
-                    }
-                  : c
-              )
-            );
-          }
+          setCropAreas((prev) =>
+            prev.map((c) =>
+              c.id === crop.id
+                ? {
+                    ...c,
+                    status: "success",
+                    extractedRowCount: newTableRows.length,
+                    croppedImageUrl: croppedBase64,
+                  }
+                : c
+            )
+          );
         } catch (e: any) {
           if (autoAbort.signal.aborted) return;
           console.error(`Error scanning crop ${crop.id}:`, e);
@@ -757,28 +736,21 @@ export default function App() {
       let detectedCols = columns;
 
       try {
-        const res = await fetch("/api/ocr/detect-columns", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+        const result = await detectColumnsAPI({
+          imageBase64: firstPage.imageUrl,
+          mimeType: "image/png",
           signal: autoAbort.signal,
-          body: JSON.stringify({
-            imageBase64: firstPage.imageUrl,
-            mimeType: "image/png",
-          }),
         });
 
-        if (res.ok) {
-          const result = await res.json();
-          if (result.data?.detectedColumns && Array.isArray(result.data.detectedColumns) && result.data.detectedColumns.length > 0) {
-            detectedCols = result.data.detectedColumns.map((col: any, idx: number) => ({
-              id: `col-auto-${Date.now()}-${idx}`,
-              name: col.name || `Cột ${idx + 1}`,
-              key: col.key || `col${idx + 1}`,
-              type: col.type || "text",
-              description: col.sample ? `Mẫu dòng 1: ${col.sample}` : undefined,
-            }));
-            setColumns(detectedCols);
-          }
+        if (result.detectedColumns && Array.isArray(result.detectedColumns) && result.detectedColumns.length > 0) {
+          detectedCols = result.detectedColumns.map((col: any, idx: number) => ({
+            id: `col-auto-${Date.now()}-${idx}`,
+            name: col.name || `Cột ${idx + 1}`,
+            key: col.key || `col${idx + 1}`,
+            type: col.type || "text",
+            description: col.sample ? `Mẫu dòng 1: ${col.sample}` : undefined,
+          }));
+          setColumns(detectedCols);
         }
       } catch (e) {
         console.warn("Auto column detection fallback to current columns:", e);
@@ -907,10 +879,31 @@ export default function App() {
           </div>
         </div>
 
-        {/* Header Right: Engine Status & Metrics */}
+        {/* Header Right: Engine Status & Metrics & API Key */}
         <div className="flex items-center gap-3">
+          {/* API Key Configuration Button */}
+          <button
+            type="button"
+            onClick={() => setIsApiKeyModalOpen(true)}
+            id="btn-api-key-settings"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all cursor-pointer shadow-2xs ${
+              savedApiKey
+                ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                : "bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100"
+            }`}
+            title="Cấu hình Gemini API Key cho người dùng bên ngoài hoặc GitHub Pages"
+          >
+            <Key className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">
+              {savedApiKey ? "API Key: Đã lưu" : "Cấu hình API Key"}
+            </span>
+            <span className="sm:hidden">
+              {savedApiKey ? "Key OK" : "Nhập Key"}
+            </span>
+          </button>
+
           {/* Status Badge */}
-          <div className="hidden sm:flex items-center bg-slate-100 rounded-full px-3 py-1.5 text-xs font-medium text-slate-600">
+          <div className="hidden md:flex items-center bg-slate-100 rounded-full px-3 py-1.5 text-xs font-medium text-slate-600">
             <span className="w-2 h-2 bg-emerald-500 rounded-full mr-2 animate-pulse"></span>
             Tiếng Việt (OCR Engine v2.4)
           </div>
@@ -1114,6 +1107,13 @@ export default function App() {
           <div>VietOCR • Định dạng xuất Microsoft Excel (.xlsx) & CSV (UTF-8)</div>
         </div>
       </footer>
+
+      {/* User-provided Gemini API Key Modal (for GitHub Pages / External Users) */}
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        onKeySaved={() => setSavedApiKey(getStoredApiKey())}
+      />
     </div>
   );
 }

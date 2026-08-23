@@ -13,6 +13,7 @@ import { removeDuplicateHeaderRows } from "../utils/tableHelper";
 import { exportToExcel, exportMultiSheetExcel, exportZipFiles, exportToCSV } from "../utils/excelExport";
 import { VIETNAMESE_PRESETS } from "../data/presets";
 import { TableEditor } from "./TableEditor";
+import { detectColumnsAPI, extractTableAPI, detectTableBoxAPI } from "../services/geminiOcrService";
 import {
   Files,
   Upload,
@@ -308,33 +309,25 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
   // Auto-detect table bounding box for a page
   const detectTableBoxForPage = async (page: DocumentPage, abortSignal: AbortSignal) => {
     try {
-      const res = await fetch("/api/ocr/detect-table-box", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const box = await detectTableBoxAPI({
+        imageBase64: page.imageUrl,
+        mimeType: "image/png",
         signal: abortSignal,
-        body: JSON.stringify({
-          imageBase64: page.imageUrl,
-          mimeType: "image/png",
-        }),
       });
 
-      if (res.ok) {
-        const result = await res.json();
-        const box = result.data;
-        if (box && box.ymin !== undefined && box.ymax !== undefined) {
-          const xPercent = (box.xmin || 0) / 10;
-          const yPercent = (box.ymin || 0) / 10;
-          const wPercent = ((box.xmax || 1000) - (box.xmin || 0)) / 10;
-          const hPercent = ((box.ymax || 1000) - (box.ymin || 0)) / 10;
+      if (box && box.ymin !== undefined && box.ymax !== undefined) {
+        const xPercent = (box.xmin || 0) / 10;
+        const yPercent = (box.ymin || 0) / 10;
+        const wPercent = ((box.xmax || 1000) - (box.xmin || 0)) / 10;
+        const hPercent = ((box.ymax || 1000) - (box.ymin || 0)) / 10;
 
-          if (wPercent > 10 && hPercent > 8) {
-            return {
-              x: (xPercent / 100) * page.originalWidth,
-              y: (yPercent / 100) * page.originalHeight,
-              width: (wPercent / 100) * page.originalWidth,
-              height: (hPercent / 100) * page.originalHeight,
-            };
-          }
+        if (wPercent > 10 && hPercent > 8) {
+          return {
+            x: (xPercent / 100) * page.originalWidth,
+            y: (yPercent / 100) * page.originalHeight,
+            width: (wPercent / 100) * page.originalWidth,
+            height: (hPercent / 100) * page.originalHeight,
+          };
         }
       }
     } catch (e) {
@@ -369,31 +362,24 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
     if (optionsOverride?.autoDetectColsFirst || targetCols.length === 0) {
       try {
         const firstPage = pages[0];
-        const colRes = await fetch("/api/ocr/detect-columns", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+        const colData = await detectColumnsAPI({
+          imageBase64: firstPage.imageUrl,
+          mimeType: "image/png",
           signal: abort.signal,
-          body: JSON.stringify({
-            imageBase64: firstPage.imageUrl,
-            mimeType: "image/png",
-          }),
         });
 
-        if (colRes.ok) {
-          const colData = await colRes.json();
-          if (
-            colData.data?.detectedColumns &&
-            Array.isArray(colData.data.detectedColumns) &&
-            colData.data.detectedColumns.length > 0
-          ) {
-            effectiveCols = colData.data.detectedColumns.map((c: any, cIdx: number) => ({
-              id: `col-${targetFile.id}-${cIdx}`,
-              name: c.name || `Cột ${cIdx + 1}`,
-              key: c.key || `col${cIdx + 1}`,
-              type: c.type || "text",
-              description: c.sample ? `Mẫu: ${c.sample}` : undefined,
-            }));
-          }
+        if (
+          colData.detectedColumns &&
+          Array.isArray(colData.detectedColumns) &&
+          colData.detectedColumns.length > 0
+        ) {
+          effectiveCols = colData.detectedColumns.map((c: any, cIdx: number) => ({
+            id: `col-${targetFile.id}-${cIdx}`,
+            name: c.name || `Cột ${cIdx + 1}`,
+            key: c.key || `col${cIdx + 1}`,
+            type: c.type || "text",
+            description: c.sample ? `Mẫu: ${c.sample}` : undefined,
+          }));
         }
       } catch (colErr) {
         console.warn("Single file column detection fallback:", colErr);
@@ -421,34 +407,27 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
       );
 
       try {
-        const ocrRes = await fetch("/api/ocr/extract-table", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+        const ocrData = await extractTableAPI({
+          imageBase64: croppedBase64,
+          mimeType: "image/png",
+          columns: effectiveCols,
+          pageNumber: page.pageNumber,
           signal: abort.signal,
-          body: JSON.stringify({
-            imageBase64: croppedBase64,
-            mimeType: "image/png",
-            columns: effectiveCols,
-            pageNumber: page.pageNumber,
-          }),
         });
 
-        if (ocrRes.ok) {
-          const ocrData = await ocrRes.json();
-          const extractedRows = ocrData.data?.rows || [];
-          extractedRows.forEach((r: any, rIdx: number) => {
-            const rowObj: TableRow = {
-              _id: `row-${targetFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
-              _pageNumber: page.pageNumber,
-              _fileName: targetFile.fileName,
-              _isModified: false,
-            };
-            effectiveCols.forEach((col) => {
-              rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
-            });
-            fileRows.push(rowObj);
+        const extractedRows = ocrData.rows || [];
+        extractedRows.forEach((r: any, rIdx: number) => {
+          const rowObj: TableRow = {
+            _id: `row-${targetFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
+            _pageNumber: page.pageNumber,
+            _fileName: targetFile.fileName,
+            _isModified: false,
+          };
+          effectiveCols.forEach((col) => {
+            rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
           });
-        }
+          fileRows.push(rowObj);
+        });
       } catch (scanErr) {
         console.error(`Error scanning page ${pIdx + 1} of ${targetFile.fileName}:`, scanErr);
       }
@@ -555,31 +534,24 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
         }));
       } else {
         try {
-          const colRes = await fetch("/api/ocr/detect-columns", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+          const colData = await detectColumnsAPI({
+            imageBase64: firstPage.imageUrl,
+            mimeType: "image/png",
             signal: abort.signal,
-            body: JSON.stringify({
-              imageBase64: firstPage.imageUrl,
-              mimeType: "image/png",
-            }),
           });
 
-          if (colRes.ok) {
-            const colData = await colRes.json();
-            if (
-              colData.data?.detectedColumns &&
-              Array.isArray(colData.data.detectedColumns) &&
-              colData.data.detectedColumns.length > 0
-            ) {
-              detectedCols = colData.data.detectedColumns.map((c: any, cIdx: number) => ({
-                id: `col-${currentFile.id}-${cIdx}`,
-                name: c.name || `Cột ${cIdx + 1}`,
-                key: c.key || `col${cIdx + 1}`,
-                type: c.type || "text",
-                description: c.sample ? `Mẫu: ${c.sample}` : undefined,
-              }));
-            }
+          if (
+            colData.detectedColumns &&
+            Array.isArray(colData.detectedColumns) &&
+            colData.detectedColumns.length > 0
+          ) {
+            detectedCols = colData.detectedColumns.map((c: any, cIdx: number) => ({
+              id: `col-${currentFile.id}-${cIdx}`,
+              name: c.name || `Cột ${cIdx + 1}`,
+              key: c.key || `col${cIdx + 1}`,
+              type: c.type || "text",
+              description: c.sample ? `Mẫu: ${c.sample}` : undefined,
+            }));
           }
         } catch (detectErr) {
           console.warn("Column detection fallback for file:", detectErr);
@@ -760,34 +732,27 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
           );
 
           try {
-            const ocrRes = await fetch("/api/ocr/extract-table", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
+            const ocrData = await extractTableAPI({
+              imageBase64: croppedBase64,
+              mimeType: "image/png",
+              columns: fileCols,
+              pageNumber: page.pageNumber,
               signal: abort.signal,
-              body: JSON.stringify({
-                imageBase64: croppedBase64,
-                mimeType: "image/png",
-                columns: fileCols,
-                pageNumber: page.pageNumber,
-              }),
             });
 
-            if (ocrRes.ok) {
-              const ocrData = await ocrRes.json();
-              const extractedRows = ocrData.data?.rows || [];
-              extractedRows.forEach((r: any, rIdx: number) => {
-                const rowObj: TableRow = {
-                  _id: `row-${currentFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
-                  _pageNumber: page.pageNumber,
-                  _fileName: currentFile.fileName,
-                  _isModified: false,
-                };
-                fileCols.forEach((col) => {
-                  rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
-                });
-                fileRows.push(rowObj);
+            const extractedRows = ocrData.rows || [];
+            extractedRows.forEach((r: any, rIdx: number) => {
+              const rowObj: TableRow = {
+                _id: `row-${currentFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
+                _pageNumber: page.pageNumber,
+                _fileName: currentFile.fileName,
+                _isModified: false,
+              };
+              fileCols.forEach((col) => {
+                rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
               });
-            }
+              fileRows.push(rowObj);
+            });
           } catch (scanErr) {
             console.error(`Error scanning page ${pIdx + 1} of ${currentFile.fileName}:`, scanErr);
           }
@@ -938,31 +903,24 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
 
           try {
             const firstPage = pages[0];
-            const colRes = await fetch("/api/ocr/detect-columns", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
+            const colData = await detectColumnsAPI({
+              imageBase64: firstPage.imageUrl,
+              mimeType: "image/png",
               signal: abort.signal,
-              body: JSON.stringify({
-                imageBase64: firstPage.imageUrl,
-                mimeType: "image/png",
-              }),
             });
 
-            if (colRes.ok) {
-              const colData = await colRes.json();
-              if (
-                colData.data?.detectedColumns &&
-                Array.isArray(colData.data.detectedColumns) &&
-                colData.data.detectedColumns.length > 0
-              ) {
-                fileCols = colData.data.detectedColumns.map((c: any, cIdx: number) => ({
-                  id: `col-${currentFile.id}-${cIdx}`,
-                  name: c.name || `Cột ${cIdx + 1}`,
-                  key: c.key || `col${cIdx + 1}`,
-                  type: c.type || "text",
-                  description: c.sample ? `Mẫu: ${c.sample}` : undefined,
-                }));
-              }
+            if (
+              colData.detectedColumns &&
+              Array.isArray(colData.detectedColumns) &&
+              colData.detectedColumns.length > 0
+            ) {
+              fileCols = colData.detectedColumns.map((c: any, cIdx: number) => ({
+                id: `col-${currentFile.id}-${cIdx}`,
+                name: c.name || `Cột ${cIdx + 1}`,
+                key: c.key || `col${cIdx + 1}`,
+                type: c.type || "text",
+                description: c.sample ? `Mẫu: ${c.sample}` : undefined,
+              }));
             }
           } catch (colErr) {
             console.warn("Column detection fallback:", colErr);
@@ -997,34 +955,27 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
           );
 
           try {
-            const ocrRes = await fetch("/api/ocr/extract-table", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
+            const ocrData = await extractTableAPI({
+              imageBase64: croppedBase64,
+              mimeType: "image/png",
+              columns: fileCols,
+              pageNumber: page.pageNumber,
               signal: abort.signal,
-              body: JSON.stringify({
-                imageBase64: croppedBase64,
-                mimeType: "image/png",
-                columns: fileCols,
-                pageNumber: page.pageNumber,
-              }),
             });
 
-            if (ocrRes.ok) {
-              const ocrData = await ocrRes.json();
-              const extractedRows = ocrData.data?.rows || [];
-              extractedRows.forEach((r: any, rIdx: number) => {
-                const rowObj: TableRow = {
-                  _id: `row-${currentFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
-                  _pageNumber: page.pageNumber,
-                  _fileName: currentFile.fileName,
-                  _isModified: false,
-                };
-                fileCols.forEach((col) => {
-                  rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
-                });
-                fileRows.push(rowObj);
+            const extractedRows = ocrData.rows || [];
+            extractedRows.forEach((r: any, rIdx: number) => {
+              const rowObj: TableRow = {
+                _id: `row-${currentFile.id}-p${page.pageNumber}-${rIdx}-${Date.now()}`,
+                _pageNumber: page.pageNumber,
+                _fileName: currentFile.fileName,
+                _isModified: false,
+              };
+              fileCols.forEach((col) => {
+                rowObj[col.key] = r[col.key] !== undefined && r[col.key] !== null ? String(r[col.key]) : "";
               });
-            }
+              fileRows.push(rowObj);
+            });
           } catch (scanErr) {
             console.error(`Error scanning page ${pIdx + 1} of ${currentFile.fileName}:`, scanErr);
           }
@@ -1201,31 +1152,24 @@ export const BulkProcessor: React.FC<BulkProcessorProps> = ({ onShowNotification
 
       let detectedCols = targetFile.columns.length > 0 ? targetFile.columns : globalColumns;
 
-      const colRes = await fetch("/api/ocr/detect-columns", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const colData = await detectColumnsAPI({
+        imageBase64: firstPage.imageUrl,
+        mimeType: "image/png",
         signal: abort.signal,
-        body: JSON.stringify({
-          imageBase64: firstPage.imageUrl,
-          mimeType: "image/png",
-        }),
       });
 
-      if (colRes.ok) {
-        const colData = await colRes.json();
-        if (
-          colData.data?.detectedColumns &&
-          Array.isArray(colData.data.detectedColumns) &&
-          colData.data.detectedColumns.length > 0
-        ) {
-          detectedCols = colData.data.detectedColumns.map((c: any, cIdx: number) => ({
-            id: `col-${targetFile.id}-${cIdx}`,
-            name: c.name || `Cột ${cIdx + 1}`,
-            key: c.key || `col${cIdx + 1}`,
-            type: c.type || "text",
-            description: c.sample ? `Mẫu: ${c.sample}` : undefined,
-          }));
-        }
+      if (
+        colData.detectedColumns &&
+        Array.isArray(colData.detectedColumns) &&
+        colData.detectedColumns.length > 0
+      ) {
+        detectedCols = colData.detectedColumns.map((c: any, cIdx: number) => ({
+          id: `col-${targetFile.id}-${cIdx}`,
+          name: c.name || `Cột ${cIdx + 1}`,
+          key: c.key || `col${cIdx + 1}`,
+          type: c.type || "text",
+          description: c.sample ? `Mẫu: ${c.sample}` : undefined,
+        }));
       }
 
       const updatedFileItem: BulkFileItem = {
